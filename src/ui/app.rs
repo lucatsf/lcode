@@ -9,6 +9,8 @@ use pollster;
 
 // Importar a função de salvamento do nosso módulo core
 use crate::core::file_handler;
+use crate::syntax_highlighting::highlighter::SyntaxHighlighter;
+
 
 // Constantes de layout (melhor definidas aqui ou em um módulo de config)
 const LINE_HEIGHT: f32 = 16.0;
@@ -66,6 +68,7 @@ pub struct MyApp {
     pub selected_tab_idx: Option<usize>,
     pub show_unsaved_changes_dialog: bool,
     pub dialog_tab_idx_to_close: Option<usize>,
+    pub highlighter: SyntaxHighlighter,
 }
 
 impl Default for MyApp {
@@ -83,6 +86,7 @@ impl Default for MyApp {
             selected_tab_idx: None,
             show_unsaved_changes_dialog: false,
             dialog_tab_idx_to_close: None,
+            highlighter: SyntaxHighlighter::new()
         }
     }
 }
@@ -181,10 +185,11 @@ impl eframe::App for MyApp {
                             ui_horizontal.vertical(|ui_vertical_numbers| {
                                 ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
                                 ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
+                                ui_vertical_numbers.style_mut().wrap = Some(false); // Evitar quebra de linha
 
-                                // Apenas para exibição inicial, não otimizado para grandes arquivos
-                                // quando o TextEdit está no controle do scroll.
                                 let total_lines = current_tab.content.len_lines();
+                                // Apenas para exibição inicial, o scroll do TextEdit controla o viewport.
+                                // A otimização virá na próxima fase com renderização manual e virtualização.
                                 for i in 0..total_lines {
                                     ui_vertical_numbers.monospace(format!("{:>4}", i + 1));
                                 }
@@ -193,15 +198,12 @@ impl eframe::App for MyApp {
                             // FR.2.2: Edição de Texto
                             let response = egui::TextEdit::multiline(&mut current_tab.text_edit_content)
                                 .desired_width(ui_horizontal.available_width())
-                                .code_editor()
+                                .code_editor() // Isso já dá um realce básico e números de linha (que estamos duplicando)
                                 .show(ui_horizontal);
 
                             // Detectar se o conteúdo do TextEdit foi modificado
                             if response.response.changed() {
-                                current_tab.is_modified = true; // FR.2.3.1
-                                // Atualizar o Rope a partir da String do TextEdit.
-                                // CUIDADO: Isso ainda é ineficiente para arquivos grandes!
-                                // A otimização virá na próxima fase.
+                                current_tab.is_modified = true;
                                 current_tab.content = Rope::from(current_tab.text_edit_content.as_str());
                                 eprintln!("Conteúdo do arquivo modificado! Marcado como não salvo.");
                             }
