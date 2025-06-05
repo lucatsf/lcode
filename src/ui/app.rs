@@ -3,13 +3,14 @@
 use eframe::egui;
 use ropey::Rope;
 use std::collections::HashMap;
-use std::path::PathBuf; // Removido 'Path'
+use std::path::PathBuf;
 use rfd::AsyncFileDialog;
 use pollster;
 
 // Importar a função de salvamento do nosso módulo core
 use crate::core::file_handler;
 use crate::syntax_highlighting::highlighter::SyntaxHighlighter;
+use egui::text::LayoutJob; // Importar LayoutJob
 
 
 // Constantes de layout (melhor definidas aqui ou em um módulo de config)
@@ -30,20 +31,17 @@ pub struct EditorTab {
     pub path: PathBuf,
     pub content: Rope,
     pub is_modified: bool,
-    pub text_edit_content: String, // Novo campo para o egui::TextEdit
+    // pub text_edit_content: String, // Este campo será eventualmente removido para otimização de memória
 }
 
 impl EditorTab {
     /// Cria uma nova aba do editor.
     pub fn new(path: PathBuf, content: Rope) -> Self {
-        // Para a fase inicial, carregar todo o conteúdo do Rope para a String.
-        // Isso será otimizado posteriormente para arquivos grandes.
-        let text_edit_content = content.to_string();
         Self {
             path,
             content,
             is_modified: false,
-            text_edit_content,
+            // text_edit_content: content.to_string(), // Inicialmente, para compatibilidade com TextEdit
         }
     }
 
@@ -69,6 +67,7 @@ pub struct MyApp {
     pub show_unsaved_changes_dialog: bool,
     pub dialog_tab_idx_to_close: Option<usize>,
     pub highlighter: SyntaxHighlighter,
+    pub editor_scroll_offset: egui::Vec2, // Para controlar o scroll do editor manualmente
 }
 
 impl Default for MyApp {
@@ -86,7 +85,8 @@ impl Default for MyApp {
             selected_tab_idx: None,
             show_unsaved_changes_dialog: false,
             dialog_tab_idx_to_close: None,
-            highlighter: SyntaxHighlighter::new()
+            highlighter: SyntaxHighlighter::new(),
+            editor_scroll_offset: egui::Vec2::ZERO,
         }
     }
 }
@@ -137,7 +137,7 @@ impl eframe::App for MyApp {
                     egui::ScrollArea::horizontal().show(ui_horizontal_tabs, |ui_scroll_tabs| {
                         ui_scroll_tabs.spacing_mut().item_spacing.x = 5.0;
 
-                        let mut tab_to_close_directly: Option<usize> = None; // Para fechar sem diálogo (se já salvo)
+                        let mut tab_to_close_directly: Option<usize> = None;
                         let mut tab_to_select: Option<usize> = None;
 
                         for (i, tab) in self.open_tabs.iter().enumerate() {
@@ -151,12 +151,10 @@ impl eframe::App for MyApp {
                             let close_button_response = ui_scroll_tabs.add(egui::Button::new("x").small());
                             if close_button_response.clicked() {
                                 if tab.is_modified {
-                                    // FR.2.3.3: Arquivo modificado, mostrar diálogo
                                     self.show_unsaved_changes_dialog = true;
                                     self.dialog_tab_idx_to_close = Some(i);
                                     eprintln!("Tentando fechar aba modificada. Mostrando diálogo.");
                                 } else {
-                                    // Arquivo não modificado, fechar diretamente
                                     tab_to_close_directly = Some(i);
                                 }
                             }
@@ -179,37 +177,83 @@ impl eframe::App for MyApp {
                     ui.heading(format!("Editor: {}", current_tab.name()));
                     ui.separator();
 
-                    let _text_edit_output = egui::ScrollArea::vertical().show(ui, |ui_scroll_area| { // Corrigido: _text_edit_output
-                        ui_scroll_area.horizontal(|ui_horizontal| {
-                            // Gutter para números de linha
-                            ui_horizontal.vertical(|ui_vertical_numbers| {
-                                ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
-                                ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
-                                ui_vertical_numbers.style_mut().wrap = Some(false); // Evitar quebra de linha
+                    let text_style = egui::TextStyle::Monospace;
+                    let row_height = ui.text_style_height(&text_style);
 
-                                let total_lines = current_tab.content.len_lines();
-                                // Apenas para exibição inicial, o scroll do TextEdit controla o viewport.
-                                // A otimização virá na próxima fase com renderização manual e virtualização.
-                                for i in 0..total_lines {
-                                    ui_vertical_numbers.monospace(format!("{:>4}", i + 1));
-                                }
+                    // FR.2.5: Números de Linha
+                    let total_lines = current_tab.content.len_lines();
+
+                    let mut layouter = |ui: &egui::Ui, s: &str, wrap_width: f32| {
+                        let mut job = LayoutJob::default();
+                        // Remover job.wrap_width = wrap_width;
+
+                        job.halign = egui::Align::LEFT;
+
+                        let highlighted_chunks = self.highlighter.highlight_line(s, &current_tab.path);
+                        for (style, text) in highlighted_chunks {
+                            let egui_color = SyntaxHighlighter::syntect_color_to_egui_color(style.foreground);
+                            job.append(
+                                text,
+                                0.0, // Indentação
+                                egui::TextFormat {
+                                    font_id: egui::FontId::monospace(row_height * 0.9), // Ajustar o tamanho da fonte
+                                    color: egui_color,
+                                    // Adicionar outros estilos se necessário (negrito, itálico)
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        ui.fonts(|f| f.layout_job(job))
+                    };
+
+                    egui::ScrollArea::vertical()
+                        .id_source("editor_scroll_area")
+                        .show_rows(ui, row_height, total_lines, |ui, row_range| {
+                            ui.horizontal(|ui_horizontal| {
+                                // Gutter para números de linha
+                                ui_horizontal.vertical(|ui_vertical_numbers| {
+                                    ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
+                                    ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
+                                    ui_vertical_numbers.style_mut().wrap = Some(false);
+
+                                    for i in row_range.start..row_range.end {
+                                        ui_vertical_numbers.monospace(format!("{:>4}", i + 1));
+                                    }
+                                });
+
+                                // Painel de texto do editor
+                                // Usamos TextEdit diretamente com o layouter customizado
+                                ui_horizontal.add_space(ui_horizontal.available_width() * 0.01); // Pequeno espaçamento
+                                ui_horizontal.vertical(|ui_editor_content| {
+                                    ui_editor_content.set_width(ui_editor_content.available_width());
+                                    ui_editor_content.spacing_mut().item_spacing.y = 0.0;
+
+                                    let mut editor_text = current_tab.content.to_string(); // Temporário: Para edição, precisamos de uma String mutável
+                                    let response = egui::TextEdit::multiline(&mut editor_text)
+                                        .desired_width(ui_editor_content.available_width())
+                                        .desired_rows(row_range.len())
+                                        .font(egui::FontId::monospace(row_height * 0.9))
+                                        .frame(false) // Remove o frame padrão do TextEdit
+                                        .lock_focus(false) // Permite que o foco saia facilmente
+                                        // .flicker_cursor(true) // Removida esta linha
+                                        .layouter(&mut layouter) // Aplica o layouter customizado
+                                        .show(ui_editor_content);
+
+                                    // Detectar se o conteúdo do TextEdit foi modificado
+                                    if response.response.changed() {
+                                        current_tab.is_modified = true;
+                                        // TODO: Otimizar para não recriar o Rope inteiro
+                                        current_tab.content = Rope::from(editor_text.as_str());
+                                        eprintln!("Conteúdo do arquivo modificado! Marcado como não salvo.");
+                                    }
+                                    // Se o TextEdit perdeu o foco ou foi modificado, precisamos atualizar o Rope
+                                    // Isso é uma simplificação. Em um editor de verdade, as alterações seriam
+                                    // aplicadas ao Rope de forma incremental (inserções/deleções) e não recriando-o.
+                                    // Para arquivos grandes, this will be a bottleneck.
+                                });
                             });
+                        });
 
-                            // FR.2.2: Edição de Texto
-                            let response = egui::TextEdit::multiline(&mut current_tab.text_edit_content)
-                                .desired_width(ui_horizontal.available_width())
-                                .code_editor() // Isso já dá um realce básico e números de linha (que estamos duplicando)
-                                .show(ui_horizontal);
-
-                            // Detectar se o conteúdo do TextEdit foi modificado
-                            if response.response.changed() {
-                                current_tab.is_modified = true;
-                                current_tab.content = Rope::from(current_tab.text_edit_content.as_str());
-                                eprintln!("Conteúdo do arquivo modificado! Marcado como não salvo.");
-                            }
-                            response
-                        })
-                    });
 
                     // FR.2.3.2: Salvar arquivos usando Ctrl+S
                     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
