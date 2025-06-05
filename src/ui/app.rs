@@ -25,15 +25,20 @@ pub struct EditorTab {
     pub path: PathBuf,
     pub content: Rope,
     pub is_modified: bool,
+    pub text_edit_content: String, // Novo campo para o egui::TextEdit
 }
 
 impl EditorTab {
     /// Cria uma nova aba do editor.
     pub fn new(path: PathBuf, content: Rope) -> Self {
+        // Para a fase inicial, carregar todo o conteúdo do Rope para a String.
+        // Isso será otimizado posteriormente para arquivos grandes.
+        let text_edit_content = content.to_string(); // Copia o conteúdo do Rope para a String
         Self {
             path,
             content,
             is_modified: false,
+            text_edit_content, // Inicializa o novo campo
         }
     }
 
@@ -61,9 +66,7 @@ pub struct MyApp {
 impl Default for MyApp {
     fn default() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
-        // O texto inicial pode ser definido aqui, ou o editor pode começar vazio.
         let initial_text = "Hello, lcode!\n\nEste é o nosso editor de código minimalista.\n\nClique em 'Abrir Diretório' para começar.\n".to_string();
-
 
         Self {
             current_dir: None,
@@ -147,6 +150,8 @@ impl eframe::App for MyApp {
                         }
 
                         if let Some(idx_to_close) = tab_to_close {
+                            // TODO: FR.2.3.3: Ao tentar fechar um arquivo com alterações não salvas,
+                            // perguntar ao usuário se deseja salvar, descartar ou cancelar.
                             self.open_tabs.remove(idx_to_close);
                             if self.open_tabs.is_empty() {
                                 self.selected_tab_idx = None;
@@ -168,33 +173,45 @@ impl eframe::App for MyApp {
                     ui.heading(format!("Editor: {}", current_tab.name()));
                     ui.separator();
 
-                    let total_lines = current_tab.content.len_lines();
-
-                    egui::ScrollArea::vertical().show_rows(ui, LINE_HEIGHT, total_lines, |ui_scroll_area, row_range| {
+                    // Usar TextEdit para a edição real do texto
+                    let text_edit_response = egui::ScrollArea::vertical().show(ui, |ui_scroll_area| {
                         ui_scroll_area.horizontal(|ui_horizontal| {
+                            // Gutter para números de linha (inalterado)
                             ui_horizontal.vertical(|ui_vertical_numbers| {
                                 ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
                                 ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
 
-                                for i in row_range.start..row_range.end {
+                                // Como TextEdit não expõe linhas individualmente para scroll_area,
+                                // precisamos calcular o range visível de linhas para os números.
+                                // Isso é uma limitação atual para esta implementação inicial.
+                                // Idealmente, o TextEdit forneceria o range de linhas visíveis.
+                                // Por enquanto, vamos exibir todos os números de linha para arquivos pequenos.
+                                // Para arquivos grandes, isso precisará ser otimizado.
+                                let total_lines = current_tab.content.len_lines();
+                                for i in 0..total_lines {
                                     ui_vertical_numbers.monospace(format!("{:>4}", i + 1));
                                 }
                             });
 
-                            let content_panel_available_width = ui_horizontal.available_width();
+                            let text_edit_output = egui::TextEdit::multiline(&mut current_tab.text_edit_content)
+                                .desired_width(ui_horizontal.available_width()) // Ocupa a largura restante
+                                .code_editor() // Estilo de editor de código (monospace, etc.)
+                                .show(ui_horizontal);
 
-                            ui_horizontal.vertical(|ui_vertical_content| {
-                                ui_vertical_content.set_width(content_panel_available_width);
-                                ui_vertical_content.spacing_mut().item_spacing.y = 0.0;
-
-                                for line_ropey in current_tab.content.lines_at(row_range.start).take(row_range.len()) {
-                                    let line_str = line_ropey.as_str().unwrap_or("");
-                                    let trimmed_line = line_str.trim_end_matches('\n').trim_end_matches('\r');
-                                    ui_vertical_content.monospace(trimmed_line);
-                                }
-                            });
+                            // Detectar se o conteúdo do TextEdit foi modificado
+                            if text_edit_output.response.changed() {
+                                current_tab.is_modified = true;
+                                // TODO: Sincronizar as alterações da String de volta para o Rope de forma eficiente.
+                                // Por enquanto, para pequenos arquivos, vamos copiar tudo.
+                                current_tab.content = Rope::from(current_tab.text_edit_content.as_str());
+                                eprintln!("Conteúdo do arquivo modificado!");
+                            }
                         });
                     });
+
+                    // TODO: Implementar lógica de salvamento (Ctrl+S). FR.2.3.2
+                    // A indicação de modificado (asterisco na aba) já está sendo feita. FR.2.3.1
+
                 } else {
                     self.selected_tab_idx = None;
                 }
