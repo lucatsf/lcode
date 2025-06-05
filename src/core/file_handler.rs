@@ -2,7 +2,7 @@
 
 use ropey::Rope;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write}; // Adicionar Write
 use std::path::Path;
 use memmap2::Mmap;
 
@@ -45,4 +45,26 @@ pub fn load_file_into_rope(path: &Path) -> io::Result<Rope> {
             Ok(Rope::from(buffer))
         }
     }
+}
+
+/// Salva o conteúdo de um Rope para um arquivo.
+///
+/// Esta função escreve todo o conteúdo do Rope para o arquivo especificado.
+/// Em futuras otimizações, podemos considerar salvamento incremental ou em background
+/// para arquivos muito grandes, mas para o salvamento manual, uma escrita completa é um bom começo.
+///
+/// # Argumentos
+///
+/// * `path` - O caminho para o arquivo onde o conteúdo será salvo.
+/// * `content` - O `Rope` contendo o texto a ser salvo.
+///
+/// # Retorno
+///
+/// Retorna um `io::Result` indicando sucesso ou falha na operação de escrita.
+pub fn save_rope_to_file(path: &Path, content: &Rope) -> io::Result<()> {
+    let mut file = File::create(path)?; // Cria ou trunca o arquivo
+    for chunk in content.chunks() {
+        file.write_all(chunk.as_bytes())?;
+    }
+    Ok(())
 }
