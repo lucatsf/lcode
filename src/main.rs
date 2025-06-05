@@ -33,44 +33,61 @@ enum FileSystemItem {
     Directory(PathBuf),
 }
 
+// Nova struct para representar um arquivo aberto (uma aba do editor)
+#[derive(Debug)]
+struct EditorTab {
+    path: PathBuf,
+    content: Rope,
+    is_modified: bool,
+}
+
+impl EditorTab {
+    fn new(path: PathBuf, content: Rope) -> Self {
+        Self {
+            path,
+            content,
+            is_modified: false, // Novo arquivo/recém-aberto não está modificado
+        }
+    }
+
+    fn name(&self) -> String {
+        let mut name = self.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if self.is_modified {
+            name.push('*'); // Adiciona asterisco se modificado
+        }
+        name
+    }
+}
+
 struct MyApp {
-    editor_content: Rope,
-    file_path: Option<String>,
+    // Campos antigos removidos: editor_content, file_path
     current_dir: Option<PathBuf>,
     expanded_dirs: HashMap<PathBuf, bool>,
     picked_folder_tx: std::sync::mpsc::Sender<PathBuf>,
     picked_folder_rx: std::sync::mpsc::Receiver<PathBuf>,
+
+    // NOVOS campos para gerenciamento de abas
+    open_tabs: Vec<EditorTab>,
+    selected_tab_idx: Option<usize>, // Índice da aba atualmente selecionada
 }
 
 impl Default for MyApp {
     fn default() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let initial_text = "Hello, lcode!\n\nEste é o nosso editor de código minimalista.\n\nClique em 'Abrir Diretório' para começar.\n".to_string();
-        let mut app = Self {
-            editor_content: Rope::from(initial_text),
-            file_path: None,
+
+        // Removida a lógica de carregamento de test_large_file.txt do default
+        // para que o editor comece vazio e incentive a abertura via explorador.
+        // Se desejar ter um arquivo inicial, você pode adicionar uma aba aqui.
+
+        Self {
             current_dir: None,
             expanded_dirs: HashMap::new(),
             picked_folder_tx: tx,
             picked_folder_rx: rx,
-        };
-
-        let test_path = Path::new("test_large_file.txt");
-        if test_path.exists() {
-            match load_file_into_rope(test_path) {
-                Ok(rope) => {
-                    app.editor_content = rope;
-                    app.file_path = Some(test_path.to_string_lossy().into_owned());
-                    eprintln!("Arquivo '{}' carregado com sucesso ao iniciar!", test_path.display());
-                },
-                Err(e) => {
-                    eprintln!("Erro ao carregar o arquivo '{}' ao iniciar: {}", test_path.display(), e);
-                }
-            }
-        } else {
-            eprintln!("Arquivo de teste '{}' não encontrado. Usando conteúdo inicial padrão.", test_path.display());
+            open_tabs: Vec::new(),
+            selected_tab_idx: None,
         }
-        app
     }
 }
 
@@ -101,6 +118,7 @@ impl eframe::App for MyApp {
                 ui.separator();
 
                 if let Some(current_dir_path) = self.current_dir.clone() {
+                    // Passa o closure de `on_file_selected` para a função de exibição da árvore
                     self.display_dir_tree(ui, &current_dir_path, 0);
                 } else {
                     ui.label("Nenhum diretório aberto.");
@@ -108,43 +126,110 @@ impl eframe::App for MyApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading(format!("Editor: {}", self.file_path.as_deref().unwrap_or("[No File Loaded]")));
-            ui.separator();
+            // Se não houver abas abertas, mostra uma mensagem inicial
+            if self.open_tabs.is_empty() {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Nenhum arquivo aberto. Selecione um arquivo no explorador.");
+                });
+                return; // Sai da função update para o painel central
+            }
 
-            let total_lines = self.editor_content.len_lines();
+            // Painel de Abas na parte superior do CentralPanel
+            egui::TopBottomPanel::top("tabs_panel").show_inside(ui, |ui_tabs| {
+                ui_tabs.horizontal(|ui_horizontal_tabs| {
+                    // Adiciona um ScrollArea horizontal para as abas, se muitas abas forem abertas
+                    egui::ScrollArea::horizontal().show(ui_horizontal_tabs, |ui_scroll_tabs| {
+                        ui_scroll_tabs.spacing_mut().item_spacing.x = 5.0; // Espaçamento entre as abas
 
-            egui::ScrollArea::vertical().show_rows(ui, LINE_HEIGHT, total_lines, |ui_scroll_area, row_range| { // Renomeado para ui_scroll_area
-                ui_scroll_area.horizontal(|ui_horizontal| {
-                    ui_horizontal.vertical(|ui_vertical_numbers| {
-                        ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
-                        ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
+                        let mut tab_to_close: Option<usize> = None;
+                        let mut tab_to_select: Option<usize> = None;
 
-                        for i in row_range.start..row_range.end {
-                            ui_vertical_numbers.monospace(format!("{:>4}", i + 1));
+                        for (i, tab) in self.open_tabs.iter().enumerate() {
+                            let is_selected = self.selected_tab_idx == Some(i);
+                            // Cria um botão de "aba"
+                            let response = ui_scroll_tabs.selectable_value(&mut self.selected_tab_idx, Some(i), tab.name());
+
+                            if response.clicked() {
+                                tab_to_select = Some(i);
+                            }
+
+                            // Botão de fechar (x) para cada aba
+                            let close_button_response = ui_scroll_tabs.add(egui::Button::new("x").small());
+                            if close_button_response.clicked() {
+                                tab_to_close = Some(i);
+                            }
                         }
-                    });
 
-                    // <--- CORREÇÃO AQUI: Capturar available_width ANTES de iniciar a closure vertical
-                    let content_panel_available_width = ui_horizontal.available_width();
+                        // Lida com a seleção da aba
+                        if let Some(idx) = tab_to_select {
+                            self.selected_tab_idx = Some(idx);
+                        }
 
-                    ui_horizontal.vertical(|ui_vertical_content| {
-                        // Usar o valor capturado
-                        ui_vertical_content.set_width(content_panel_available_width);
-                        ui_vertical_content.spacing_mut().item_spacing.y = 0.0;
-
-                        for line_ropey in self.editor_content.lines_at(row_range.start).take(row_range.len()) {
-                            let line_str = line_ropey.as_str().unwrap_or("");
-                            let trimmed_line = line_str.trim_end_matches('\n').trim_end_matches('\r');
-                            ui_vertical_content.monospace(trimmed_line);
+                        // Lida com o fechamento da aba
+                        if let Some(idx_to_close) = tab_to_close {
+                            self.open_tabs.remove(idx_to_close);
+                            if self.open_tabs.is_empty() {
+                                self.selected_tab_idx = None;
+                            } else if let Some(selected_idx) = self.selected_tab_idx {
+                                // Ajusta o índice selecionado se a aba fechada estava antes dele
+                                if idx_to_close < selected_idx {
+                                    self.selected_tab_idx = Some(selected_idx - 1);
+                                } else if idx_to_close == selected_idx {
+                                    // Se a aba selecionada foi fechada, seleciona a próxima ou a anterior
+                                    self.selected_tab_idx = Some(idx_to_close.min(self.open_tabs.len().saturating_sub(1)));
+                                }
+                            }
                         }
                     });
                 });
             });
+
+            // Conteúdo do Editor para a aba selecionada
+            if let Some(selected_idx) = self.selected_tab_idx {
+                if let Some(current_tab) = self.open_tabs.get_mut(selected_idx) {
+                    ui.heading(format!("Editor: {}", current_tab.name()));
+                    ui.separator();
+
+                    let total_lines = current_tab.content.len_lines();
+
+                    egui::ScrollArea::vertical().show_rows(ui, LINE_HEIGHT, total_lines, |ui_scroll_area, row_range| {
+                        ui_scroll_area.horizontal(|ui_horizontal| {
+                            ui_horizontal.vertical(|ui_vertical_numbers| {
+                                ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
+                                ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
+
+                                for i in row_range.start..row_range.end {
+                                    ui_vertical_numbers.monospace(format!("{:>4}", i + 1));
+                                }
+                            });
+
+                            let content_panel_available_width = ui_horizontal.available_width();
+
+                            ui_horizontal.vertical(|ui_vertical_content| {
+                                ui_vertical_content.set_width(content_panel_available_width);
+                                ui_vertical_content.spacing_mut().item_spacing.y = 0.0;
+
+                                // Aqui, adicionaremos a lógica de edição de texto na próxima fase.
+                                // Por enquanto, apenas exibimos o texto.
+                                for line_ropey in current_tab.content.lines_at(row_range.start).take(row_range.len()) {
+                                    let line_str = line_ropey.as_str().unwrap_or("");
+                                    let trimmed_line = line_str.trim_end_matches('\n').trim_end_matches('\r');
+                                    ui_vertical_content.monospace(trimmed_line);
+                                }
+                            });
+                        });
+                    });
+                } else {
+                    // Caso o índice selecionado seja inválido por algum motivo
+                    self.selected_tab_idx = None;
+                }
+            }
         });
     }
 }
 
 impl MyApp {
+    // Modificado para lidar com a abertura de abas
     fn display_dir_tree(&mut self, ui: &mut egui::Ui, path: &PathBuf, indent_level: usize) {
         let is_dir_expanded = *self.expanded_dirs.entry(path.clone()).or_insert(false);
         let indent = indent_level as f32 * 15.0;
@@ -168,14 +253,21 @@ impl MyApp {
                         ui.horizontal(|ui_file_entry| {
                             ui_file_entry.add_space(indent + 30.0);
                             if ui_file_entry.button(format!("📄 {}", entry_path.file_name().unwrap_or_default().to_string_lossy())).clicked() {
-                                match load_file_into_rope(&entry_path) {
-                                    Ok(rope) => {
-                                        self.editor_content = rope;
-                                        self.file_path = Some(entry_path.to_string_lossy().into_owned());
-                                        eprintln!("Arquivo '{}' carregado com sucesso!", entry_path.display());
-                                    },
-                                    Err(e) => {
-                                        eprintln!("Erro ao carregar o arquivo '{}': {}", entry_path.display(), e);
+                                // FR.1.3.2: Se o arquivo já estiver aberto, focar na aba existente
+                                if let Some(idx) = self.open_tabs.iter().position(|tab| tab.path == entry_path) {
+                                    self.selected_tab_idx = Some(idx);
+                                    eprintln!("Arquivo '{}' já aberto, focando na aba existente.", entry_path.display());
+                                } else {
+                                    match load_file_into_rope(&entry_path) {
+                                        Ok(rope) => {
+                                            let new_tab = EditorTab::new(entry_path.clone(), rope);
+                                            self.open_tabs.push(new_tab);
+                                            self.selected_tab_idx = Some(self.open_tabs.len() - 1); // Seleciona a nova aba
+                                            eprintln!("Arquivo '{}' carregado e nova aba criada.", entry_path.display());
+                                        },
+                                        Err(e) => {
+                                            eprintln!("Erro ao carregar o arquivo '{}': {}", entry_path.display(), e);
+                                        }
                                     }
                                 }
                             }
