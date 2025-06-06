@@ -185,7 +185,7 @@ impl eframe::App for MyApp {
 
                     let mut layouter = |ui: &egui::Ui, s: &str, wrap_width: f32| {
                         let mut job = LayoutJob::default();
-                        // Remover job.wrap_width = wrap_width; // Já removido
+                        // Remover job.wrap_width = wrap_width;
 
                         job.halign = egui::Align::LEFT;
 
@@ -222,21 +222,34 @@ impl eframe::App for MyApp {
                                 });
 
                                 // Painel de texto do editor
+                                // Usamos TextEdit diretamente com o layouter customizado
                                 ui_horizontal.add_space(ui_horizontal.available_width() * 0.01); // Pequeno espaçamento
                                 ui_horizontal.vertical(|ui_editor_content| {
                                     ui_editor_content.set_width(ui_editor_content.available_width());
                                     ui_editor_content.spacing_mut().item_spacing.y = 0.0;
 
-                                    // Iterar e renderizar linhas visíveis diretamente do Rope
-                                    for line_idx in row_range.start..row_range.end {
-                                        if let Some(line) = current_tab.content.get_line(line_idx) {
-                                            // Usar o layouter para obter o LayoutJob com realce de sintaxe
-                                            let job = layouter(ui_editor_content, line.as_str().unwrap_or(""), ui_editor_content.available_width());
-                                            ui_editor_content.label(job);
-                                        }
+                                    let mut editor_text = current_tab.content.to_string(); // Temporário: Para edição, precisamos de uma String mutável
+                                    let response = egui::TextEdit::multiline(&mut editor_text)
+                                        .desired_width(ui_editor_content.available_width())
+                                        .desired_rows(row_range.len())
+                                        .font(egui::FontId::monospace(row_height * 0.9))
+                                        .frame(false) // Remove o frame padrão do TextEdit
+                                        .lock_focus(false) // Permite que o foco saia facilmente
+                                        // .flicker_cursor(true) // Removida esta linha
+                                        .layouter(&mut layouter) // Aplica o layouter customizado
+                                        .show(ui_editor_content);
+
+                                    // Detectar se o conteúdo do TextEdit foi modificado
+                                    if response.response.changed() {
+                                        current_tab.is_modified = true;
+                                        // TODO: Otimizar para não recriar o Rope inteiro
+                                        current_tab.content = Rope::from(editor_text.as_str());
+                                        eprintln!("Conteúdo do arquivo modificado! Marcado como não salvo.");
                                     }
-                                    // Com esta abordagem, o TextEdit não é usado para exibição nem para edição.
-                                    // A detecção de modificação e salvamento de arquivos precisará de uma nova lógica de entrada do usuário.
+                                    // Se o TextEdit perdeu o foco ou foi modificado, precisamos atualizar o Rope
+                                    // Isso é uma simplificação. Em um editor de verdade, as alterações seriam
+                                    // aplicadas ao Rope de forma incremental (inserções/deleções) e não recriando-o.
+                                    // Para arquivos grandes, this will be a bottleneck.
                                 });
                             });
                         });
