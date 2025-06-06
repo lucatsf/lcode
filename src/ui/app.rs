@@ -31,17 +31,18 @@ pub struct EditorTab {
     pub path: PathBuf,
     pub content: Rope,
     pub is_modified: bool,
-    // pub text_edit_content: String, // Este campo será eventualmente removido para otimização de memória
+    pub text_buffer_for_egui: String, // Novo campo para a string que o egui TextEdit usará
 }
 
 impl EditorTab {
     /// Cria uma nova aba do editor.
     pub fn new(path: PathBuf, content: Rope) -> Self {
+        let initial_string_content = content.to_string(); //
         Self {
             path,
             content,
             is_modified: false,
-            // text_edit_content: content.to_string(), // Inicialmente, para compatibilidade com TextEdit
+            text_buffer_for_egui: initial_string_content, //
         }
     }
 
@@ -183,10 +184,8 @@ impl eframe::App for MyApp {
                     // FR.2.5: Números de Linha
                     let total_lines = current_tab.content.len_lines();
 
-                    let mut layouter = |ui: &egui::Ui, s: &str, wrap_width: f32| {
+                    let mut layouter = |ui: &egui::Ui, s: &str, _wrap_width: f32| { // _wrap_width is unused
                         let mut job = LayoutJob::default();
-                        // Remover job.wrap_width = wrap_width;
-
                         job.halign = egui::Align::LEFT;
 
                         let highlighted_chunks = self.highlighter.highlight_line(s, &current_tab.path);
@@ -198,7 +197,6 @@ impl eframe::App for MyApp {
                                 egui::TextFormat {
                                     font_id: egui::FontId::monospace(row_height * 0.9), // Ajustar o tamanho da fonte
                                     color: egui_color,
-                                    // Adicionar outros estilos se necessário (negrito, itálico)
                                     ..Default::default()
                                 },
                             );
@@ -222,38 +220,41 @@ impl eframe::App for MyApp {
                                 });
 
                                 // Painel de texto do editor
-                                // Usamos TextEdit diretamente com o layouter customizado
                                 ui_horizontal.add_space(ui_horizontal.available_width() * 0.01); // Pequeno espaçamento
                                 ui_horizontal.vertical(|ui_editor_content| {
                                     ui_editor_content.set_width(ui_editor_content.available_width());
                                     ui_editor_content.spacing_mut().item_spacing.y = 0.0;
 
-                                    let mut editor_text = current_tab.content.to_string(); // Temporário: Para edição, precisamos de uma String mutável
-                                    let response = egui::TextEdit::multiline(&mut editor_text)
+                                    // --- INÍCIO DAS MUDANÇAS AQUI ---
+                                    // Captura o estado atual da string antes da edição do egui
+                                    let old_text_buffer_for_egui = current_tab.text_buffer_for_egui.clone();
+
+                                    let response = egui::TextEdit::multiline(&mut current_tab.text_buffer_for_egui)
                                         .desired_width(ui_editor_content.available_width())
                                         .desired_rows(row_range.len())
                                         .font(egui::FontId::monospace(row_height * 0.9))
-                                        .frame(false) // Remove o frame padrão do TextEdit
-                                        .lock_focus(false) // Permite que o foco saia facilmente
-                                        // .flicker_cursor(true) // Removida esta linha
-                                        .layouter(&mut layouter) // Aplica o layouter customizado
+                                        .frame(false)
+                                        .lock_focus(false)
+                                        .layouter(&mut layouter)
                                         .show(ui_editor_content);
 
                                     // Detectar se o conteúdo do TextEdit foi modificado
                                     if response.response.changed() {
                                         current_tab.is_modified = true;
-                                        // TODO: Otimizar para não recriar o Rope inteiro
-                                        current_tab.content = Rope::from(editor_text.as_str());
-                                        eprintln!("Conteúdo do arquivo modificado! Marcado como não salvo.");
+                                        eprintln!("Conteúdo do arquivo modificado! Detectando e aplicando deltas...");
+
+                                        // Chamar a função para aplicar as diferenças ao Rope
+                                        apply_string_diff_to_rope(
+                                            &mut current_tab.content,
+                                            &old_text_buffer_for_egui,
+                                            &current_tab.text_buffer_for_egui,
+                                        );
+                                        eprintln!("Deltas aplicados ao Rope.");
                                     }
-                                    // Se o TextEdit perdeu o foco ou foi modificado, precisamos atualizar o Rope
-                                    // Isso é uma simplificação. Em um editor de verdade, as alterações seriam
-                                    // aplicadas ao Rope de forma incremental (inserções/deleções) e não recriando-o.
-                                    // Para arquivos grandes, this will be a bottleneck.
+                                    // --- FIM DAS MUDANÇAS AQUI ---
                                 });
                             });
                         });
-
 
                     // FR.2.3.2: Salvar arquivos usando Ctrl+S
                     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
@@ -349,5 +350,63 @@ impl MyApp {
         if !open { // Se o diálogo foi fechado por qualquer ação, limpar o índice
             self.dialog_tab_idx_to_close = None;
         }
+    }
+}
+
+fn apply_string_diff_to_rope(
+    rope: &mut Rope,
+    old_s: &str,
+    new_s: &str,
+) {
+    // Encontrar o prefixo comum
+    let mut common_prefix_len = 0;
+    for (old_char, new_char) in old_s.chars().zip(new_s.chars()) {
+        if old_char == new_char {
+            common_prefix_len += old_char.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    // Encontrar o sufixo comum
+    let mut common_suffix_len = 0;
+    for (old_char, new_char) in old_s.chars().rev().zip(new_s.chars().rev()) {
+        if old_char == new_char {
+            common_suffix_len += old_char.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    // Se o prefixo e sufixo se sobrepõem, significa que não houve alteração
+    if common_prefix_len + common_suffix_len > old_s.len().min(new_s.len()) {
+        return; // Nenhuma mudança real (ou apenas reordenação interna não detectada por esta lógica simples)
+    }
+
+    // Calcular o índice de início da mudança no `old_s`
+    let old_start_idx = rope.char_to_byte(rope.byte_to_char(common_prefix_len));
+
+    // Calcular o índice de fim da mudança no `old_s`
+    let old_end_idx = rope.len_bytes() - common_suffix_len;
+
+    // Calcular o índice de início da mudança no `new_s`
+    let new_start_idx = common_prefix_len;
+    // Calcular o índice de fim da mudança no `new_s`
+    let new_end_idx = new_s.len() - common_suffix_len;
+
+    // A parte que foi removida (se houver)
+    let chars_to_remove = rope.byte_to_char(old_end_idx) - rope.byte_to_char(old_start_idx);
+
+    // A parte que foi inserida (se houver)
+    let chars_to_insert = &new_s[new_start_idx..new_end_idx];
+
+    // Aplicar as operações ao Rope
+    if chars_to_remove > 0 {
+        rope.remove(rope.byte_to_char(old_start_idx)..rope.byte_to_char(old_end_idx));
+        eprintln!("Removidos {} chars a partir do byte {}", chars_to_remove, old_start_idx);
+    }
+    if !chars_to_insert.is_empty() {
+        rope.insert(rope.byte_to_char(old_start_idx), chars_to_insert);
+        eprintln!("Inseridos '{}' a partir do byte {}", chars_to_insert, old_start_idx);
     }
 }
