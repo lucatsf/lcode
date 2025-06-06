@@ -12,6 +12,9 @@ use crate::core::file_handler;
 use crate::syntax_highlighting::highlighter::SyntaxHighlighter;
 use egui::text::LayoutJob; // Importar LayoutJob
 
+// ADICIONAR ESTA LINHA:
+use crate::core::editor::TextEditor;
+
 
 // Constantes de layout (melhor definidas aqui ou em um módulo de config)
 const LINE_HEIGHT: f32 = 16.0;
@@ -31,18 +34,18 @@ pub struct EditorTab {
     pub path: PathBuf,
     pub content: Rope,
     pub is_modified: bool,
-    pub text_buffer_for_egui: String, // Novo campo para a string que o egui TextEdit usará
+    // REMOVIDO: pub text_buffer_for_egui: String,
+    pub editor_state: TextEditor, // NOVO CAMPO: estado do editor para esta aba
 }
 
 impl EditorTab {
     /// Cria uma nova aba do editor.
     pub fn new(path: PathBuf, content: Rope) -> Self {
-        let initial_string_content = content.to_string(); //
         Self {
             path,
             content,
             is_modified: false,
-            text_buffer_for_egui: initial_string_content, //
+            editor_state: TextEditor::new(), // Inicializa o novo TextEditor
         }
     }
 
@@ -183,75 +186,60 @@ impl eframe::App for MyApp {
 
                     // FR.2.5: Números de Linha
                     let total_lines = current_tab.content.len_lines();
-
-                    let mut layouter = |ui: &egui::Ui, s: &str, _wrap_width: f32| { // _wrap_width is unused
-                        let mut job = LayoutJob::default();
-                        job.halign = egui::Align::LEFT;
-
-                        let highlighted_chunks = self.highlighter.highlight_line(s, &current_tab.path);
-                        for (style, text) in highlighted_chunks {
-                            let egui_color = SyntaxHighlighter::syntect_color_to_egui_color(style.foreground);
-                            job.append(
-                                text,
-                                0.0, // Indentação
-                                egui::TextFormat {
-                                    font_id: egui::FontId::monospace(row_height * 0.9), // Ajustar o tamanho da fonte
-                                    color: egui_color,
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                        ui.fonts(|f| f.layout_job(job))
-                    };
-
+                    
+                    // egui::ScrollArea::vertical()
+                    //     .id_source("editor_scroll_area") // DEPRECATED: id_salt
                     egui::ScrollArea::vertical()
-                        .id_source("editor_scroll_area")
+                        .id_salt("editor_scroll_area") // Use id_salt instead
                         .show_rows(ui, row_height, total_lines, |ui, row_range| {
                             ui.horizontal(|ui_horizontal| {
                                 // Gutter para números de linha
                                 ui_horizontal.vertical(|ui_vertical_numbers| {
                                     ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
                                     ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
-                                    ui_vertical_numbers.style_mut().wrap = Some(false);
+                                    // ui_vertical_numbers.style_mut().wrap = Some(false); // DEPRECATED: wrap_mode
+                                    ui_vertical_numbers.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend); // Use wrap_mode instead
 
                                     for i in row_range.start..row_range.end {
                                         ui_vertical_numbers.monospace(format!("{:>4}", i + 1));
                                     }
                                 });
 
-                                // Painel de texto do editor
+                                // Painel de texto do editor (onde o TextEdit estava)
                                 ui_horizontal.add_space(ui_horizontal.available_width() * 0.01); // Pequeno espaçamento
                                 ui_horizontal.vertical(|ui_editor_content| {
                                     ui_editor_content.set_width(ui_editor_content.available_width());
                                     ui_editor_content.spacing_mut().item_spacing.y = 0.0;
 
-                                    // --- INÍCIO DAS MUDANÇAS AQUI ---
-                                    // Captura o estado atual da string antes da edição do egui
-                                    let old_text_buffer_for_egui = current_tab.text_buffer_for_egui.clone();
+                                    // LÓGICA DE RENDERIZAÇÃO MANUAL DAS LINHAS E EVENTOS DO TECLADO VIRÁ AQUI
+                                    // Esta é a parte que vamos desenvolver a seguir.
+                                    // Por enquanto, apenas a renderização das linhas:
+                                    for line_idx in row_range.start..row_range.end {
+                                        let line = current_tab.content.line(line_idx);
+                                        let line_str = line.as_str().unwrap_or(""); // Ropey guarantees valid UTF-8
+                                        
+                                        let mut job = LayoutJob::default();
+                                        job.halign = egui::Align::LEFT;
 
-                                    let response = egui::TextEdit::multiline(&mut current_tab.text_buffer_for_egui)
-                                        .desired_width(ui_editor_content.available_width())
-                                        .desired_rows(row_range.len())
-                                        .font(egui::FontId::monospace(row_height * 0.9))
-                                        .frame(false)
-                                        .lock_focus(false)
-                                        .layouter(&mut layouter)
-                                        .show(ui_editor_content);
-
-                                    // Detectar se o conteúdo do TextEdit foi modificado
-                                    if response.response.changed() {
-                                        current_tab.is_modified = true;
-                                        eprintln!("Conteúdo do arquivo modificado! Detectando e aplicando deltas...");
-
-                                        // Chamar a função para aplicar as diferenças ao Rope
-                                        apply_string_diff_to_rope(
-                                            &mut current_tab.content,
-                                            &old_text_buffer_for_egui,
-                                            &current_tab.text_buffer_for_egui,
-                                        );
-                                        eprintln!("Deltas aplicados ao Rope.");
+                                        let highlighted_chunks = self.highlighter.highlight_line(line_str, &current_tab.path);
+                                        for (style, text) in highlighted_chunks {
+                                            let egui_color = SyntaxHighlighter::syntect_color_to_egui_color(style.foreground);
+                                            job.append(
+                                                text,
+                                                0.0, // Indentação
+                                                egui::TextFormat {
+                                                    font_id: egui::FontId::monospace(row_height * 0.9), // Ajustar o tamanho da fonte
+                                                    color: egui_color,
+                                                    ..Default::default()
+                                                },
+                                            );
+                                        }
+                                        ui_editor_content.label(job); // Renderiza a linha realçada
                                     }
-                                    // --- FIM DAS MUDANÇAS AQUI ---
+
+                                    // Placeholder para a lógica de input de teclado e cursor
+                                    // Esta lógica será movida para dentro da struct TextEditor ou de um método dela.
+                                    // ui_editor_content.label("Editor content will be rendered here, and input handled manually.");
                                 });
                             });
                         });
@@ -279,7 +267,7 @@ impl eframe::App for MyApp {
     }
 }
 
-// Métodos auxiliares para MyApp
+// Métodos auxiliares para MyApp (inalterados, exceto a remoção de apply_string_diff_to_rope)
 impl MyApp {
     // Nova função para salvar a aba atualmente selecionada
     fn save_current_tab(&mut self, ctx: &egui::Context) {
@@ -350,63 +338,5 @@ impl MyApp {
         if !open { // Se o diálogo foi fechado por qualquer ação, limpar o índice
             self.dialog_tab_idx_to_close = None;
         }
-    }
-}
-
-fn apply_string_diff_to_rope(
-    rope: &mut Rope,
-    old_s: &str,
-    new_s: &str,
-) {
-    // Encontrar o prefixo comum
-    let mut common_prefix_len = 0;
-    for (old_char, new_char) in old_s.chars().zip(new_s.chars()) {
-        if old_char == new_char {
-            common_prefix_len += old_char.len_utf8();
-        } else {
-            break;
-        }
-    }
-
-    // Encontrar o sufixo comum
-    let mut common_suffix_len = 0;
-    for (old_char, new_char) in old_s.chars().rev().zip(new_s.chars().rev()) {
-        if old_char == new_char {
-            common_suffix_len += old_char.len_utf8();
-        } else {
-            break;
-        }
-    }
-
-    // Se o prefixo e sufixo se sobrepõem, significa que não houve alteração
-    if common_prefix_len + common_suffix_len > old_s.len().min(new_s.len()) {
-        return; // Nenhuma mudança real (ou apenas reordenação interna não detectada por esta lógica simples)
-    }
-
-    // Calcular o índice de início da mudança no `old_s`
-    let old_start_idx = rope.char_to_byte(rope.byte_to_char(common_prefix_len));
-
-    // Calcular o índice de fim da mudança no `old_s`
-    let old_end_idx = rope.len_bytes() - common_suffix_len;
-
-    // Calcular o índice de início da mudança no `new_s`
-    let new_start_idx = common_prefix_len;
-    // Calcular o índice de fim da mudança no `new_s`
-    let new_end_idx = new_s.len() - common_suffix_len;
-
-    // A parte que foi removida (se houver)
-    let chars_to_remove = rope.byte_to_char(old_end_idx) - rope.byte_to_char(old_start_idx);
-
-    // A parte que foi inserida (se houver)
-    let chars_to_insert = &new_s[new_start_idx..new_end_idx];
-
-    // Aplicar as operações ao Rope
-    if chars_to_remove > 0 {
-        rope.remove(rope.byte_to_char(old_start_idx)..rope.byte_to_char(old_end_idx));
-        eprintln!("Removidos {} chars a partir do byte {}", chars_to_remove, old_start_idx);
-    }
-    if !chars_to_insert.is_empty() {
-        rope.insert(rope.byte_to_char(old_start_idx), chars_to_insert);
-        eprintln!("Inseridos '{}' a partir do byte {}", chars_to_insert, old_start_idx);
     }
 }
