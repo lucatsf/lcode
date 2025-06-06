@@ -14,14 +14,20 @@ fn get_file_icon(path: &PathBuf) -> &'static str {
     if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
         match extension.to_lowercase().as_str() {
             // Exemplos de mapeamento para ícones específicos de linguagem
-            "js" | "jsx" | "ts" | "tsx" => regular::CODE_BLOCK, // Ou um ícone mais específico se disponível, como 'regular::FILE_JS'
-            "php" => regular::CODE_BLOCK, // Ou um ícone mais específico se disponível, como 'regular::FILE_PHP'
+            "js" => regular::FILE_JS, // Ou um ícone mais específico se disponível, como 'regular::FILE_JS'
+            "jsx" => regular::FILE_JSX,
+            "ts" => regular::FILE_TS,
+            "tsx" => regular::FILE_TSX,
             "json" => regular::CODE_BLOCK,
-            "py" => regular::CODE_BLOCK,
-            "rs" => regular::CODE_BLOCK,
+            "py" => regular::FILE_PY,
+            "sql" => regular::FILE_SQL,
+            "rs" => regular::FILE_RS,
             "md" => regular::FILE_TEXT,
-            "css" => regular::CODE_BLOCK,
-            "html" | "htm" => regular::CODE_BLOCK,
+            "css" => regular::FILE_CSS,
+            "html" | "htm" => regular::FILE_HTML,
+            "c" => regular::FILE_C,
+            "cpp" => regular::FILE_CPP,
+            "txt" => regular::FILE_TEXT,
             // Adicione mais casos conforme necessário para outras linguagens ou tipos de arquivo
             _ => regular::FILE, // Ícone de arquivo genérico para extensões não mapeadas
         }
