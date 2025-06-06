@@ -1,30 +1,36 @@
 // src/file_explorer/fs_tree.rs
 
 use eframe::egui;
-// Removidas as importações desnecessárias, pois HashMap é usado em MyApp
-// e Path é usado indiretamente via PathBuf ou em file_handler.
-// use std::collections::HashMap;
 use walkdir::WalkDir;
-use std::path::PathBuf; // PathBuf é o que você usa diretamente aqui
+use std::path::PathBuf;
 
 use crate::ui::app::{EditorTab, MyApp};
 use crate::core::file_handler;
 
-// As constantes do layout também podem ser movidas para um módulo de "configurações"
-// ou mantidas no MyApp se forem específicas da UI. Por agora, vamos mantê-las aqui
-// ou onde forem mais usadas.
+use egui_phosphor::variants::{fill, regular}; // Módulos de variantes
 
-/// Exibe a árvore de diretórios no painel lateral.
-///
-/// Esta função lida com a navegação de diretórios, expansão/retração
-/// e a abertura de arquivos em novas abas do editor.
-///
-/// # Argumentos
-///
-/// * `ui` - O UI para desenhar os widgets.
-/// * `path` - O caminho do diretório atual sendo exibido.
-/// * `indent_level` - O nível de indentação para a exibição (para subdiretórios).
-impl MyApp { // Colocamos a função como um método de MyApp
+// Função auxiliar para obter o ícone Phosphor com base na extensão do arquivo
+fn get_file_icon(path: &PathBuf) -> &'static str {
+    if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
+        match extension.to_lowercase().as_str() {
+            // Exemplos de mapeamento para ícones específicos de linguagem
+            "js" | "jsx" | "ts" | "tsx" => regular::CODE_BLOCK, // Ou um ícone mais específico se disponível, como 'regular::FILE_JS'
+            "php" => regular::CODE_BLOCK, // Ou um ícone mais específico se disponível, como 'regular::FILE_PHP'
+            "json" => regular::CODE_BLOCK,
+            "py" => regular::CODE_BLOCK,
+            "rs" => regular::CODE_BLOCK,
+            "md" => regular::FILE_TEXT,
+            "css" => regular::CODE_BLOCK,
+            "html" | "htm" => regular::CODE_BLOCK,
+            // Adicione mais casos conforme necessário para outras linguagens ou tipos de arquivo
+            _ => regular::FILE, // Ícone de arquivo genérico para extensões não mapeadas
+        }
+    } else {
+        regular::FILE // Ícone de arquivo genérico se não houver extensão
+    }
+}
+
+impl MyApp {
     pub fn display_dir_tree(&mut self, ui: &mut egui::Ui, path: &PathBuf, indent_level: usize) {
         let is_dir_expanded = *self.expanded_dirs.entry(path.clone()).or_insert(false);
         let indent = indent_level as f32 * 15.0;
@@ -32,11 +38,16 @@ impl MyApp { // Colocamos a função como um método de MyApp
         if path.is_dir() {
             ui.horizontal(|ui_dir_entry| {
                 ui_dir_entry.add_space(indent);
-                let toggle_icon = if is_dir_expanded { "▼" } else { "►" };
-                if ui_dir_entry.button(toggle_icon).clicked() {
+                let toggle_icon = if is_dir_expanded {
+                    fill::CARET_DOWN
+                } else {
+                    fill::CARET_RIGHT
+                };
+
+                if ui_dir_entry.add(egui::Button::new(toggle_icon).small()).clicked() {
                     *self.expanded_dirs.entry(path.clone()).or_insert(false) = !is_dir_expanded;
                 }
-                ui_dir_entry.label(format!("📁 {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                ui_dir_entry.label(format!("{} {}", regular::FOLDER_SIMPLE, path.file_name().unwrap_or_default().to_string_lossy()));
             });
 
             if is_dir_expanded {
@@ -47,8 +58,9 @@ impl MyApp { // Colocamos a função como um método de MyApp
                     } else if entry_path.is_file() {
                         ui.horizontal(|ui_file_entry| {
                             ui_file_entry.add_space(indent + 30.0);
-                            if ui_file_entry.button(format!("📄 {}", entry_path.file_name().unwrap_or_default().to_string_lossy())).clicked() {
-                                // FR.1.3.2: Se o arquivo já estiver aberto, focar na aba existente
+                            // Use a nova função auxiliar para obter o ícone correto
+                            let file_icon = get_file_icon(&entry_path);
+                            if ui_file_entry.button(format!("{} {}", file_icon, entry_path.file_name().unwrap_or_default().to_string_lossy())).clicked() {
                                 if let Some(idx) = self.open_tabs.iter().position(|tab| tab.path == entry_path) {
                                     self.selected_tab_idx = Some(idx);
                                     eprintln!("Arquivo '{}' já aberto, focando na aba existente.", entry_path.display());
@@ -57,7 +69,7 @@ impl MyApp { // Colocamos a função como um método de MyApp
                                         Ok(rope) => {
                                             let new_tab = EditorTab::new(entry_path.clone(), rope);
                                             self.open_tabs.push(new_tab);
-                                            self.selected_tab_idx = Some(self.open_tabs.len() - 1); // Seleciona a nova aba
+                                            self.selected_tab_idx = Some(self.open_tabs.len() - 1);
                                             eprintln!("Arquivo '{}' carregado e nova aba criada.", entry_path.display());
                                         },
                                         Err(e) => {

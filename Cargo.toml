@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eframe = "0.27.0"
-egui = "0.27.0"
+eframe = "0.31"
+egui = "0.31"
 ropey = "1.6.1"
 memmap2 = "0.9.5"
 rfd = "0.15.3"
 walkdir = "2.5.0"
 pollster = "0.4.0"
 syntect = "5.2.0"
+egui-phosphor = { version = "0.9.0", features = ["fill", "regular"] }
