@@ -10,13 +10,16 @@ use pollster;
 // Importar a função de salvamento do nosso módulo core
 use crate::core::file_handler;
 use crate::syntax_highlighting::highlighter::SyntaxHighlighter;
-use egui::text::LayoutJob; // Importar LayoutJob
+//use egui::text::LayoutJob; // Importar LayoutJob (ainda usado indiretamente via EditorPanel)
 
-// ADICIONAR ESTA LINHA:
+// NOVO: Importar o módulo do editor de texto que estamos criando
 use crate::core::editor::TextEditor;
+// NOVO: Importar o novo painel de UI do editor
+use crate::ui::editor_ui::EditorPanel;
 
 
 // Constantes de layout (melhor definidas aqui ou em um módulo de config)
+// Podem ser movidas para um módulo de constantes, como 'src/utils/constants.rs'
 const LINE_HEIGHT: f32 = 16.0;
 const LINE_NUMBER_GUTTER_WIDTH: f32 = 60.0;
 const SIDE_PANEL_WIDTH: f32 = 200.0;
@@ -34,18 +37,21 @@ pub struct EditorTab {
     pub path: PathBuf,
     pub content: Rope,
     pub is_modified: bool,
-    // REMOVIDO: pub text_buffer_for_egui: String,
-    pub editor_state: TextEditor, // NOVO CAMPO: estado do editor para esta aba
+    // CAMPO REMOVIDO: pub text_buffer_for_egui: String,
+    // CAMPO NOVO: Estado do editor para esta aba
+    pub editor_state: TextEditor,
 }
 
 impl EditorTab {
     /// Cria uma nova aba do editor.
     pub fn new(path: PathBuf, content: Rope) -> Self {
+        // Inicialização de text_buffer_for_egui removida
         Self {
             path,
             content,
             is_modified: false,
-            editor_state: TextEditor::new(), // Inicializa o novo TextEditor
+            // Inicializa o novo TextEditor para a aba
+            editor_state: TextEditor::new(),
         }
     }
 
@@ -71,7 +77,7 @@ pub struct MyApp {
     pub show_unsaved_changes_dialog: bool,
     pub dialog_tab_idx_to_close: Option<usize>,
     pub highlighter: SyntaxHighlighter,
-    pub editor_scroll_offset: egui::Vec2, // Para controlar o scroll do editor manualmente
+    pub editor_scroll_offset: egui::Vec2, // Para controlar o scroll do editor manualmente (pode ser movido para EditorPanel.scroll_offset)
 }
 
 impl Default for MyApp {
@@ -181,70 +187,20 @@ impl eframe::App for MyApp {
                     ui.heading(format!("Editor: {}", current_tab.name()));
                     ui.separator();
 
-                    let text_style = egui::TextStyle::Monospace;
-                    let row_height = ui.text_style_height(&text_style);
-
-                    // FR.2.5: Números de Linha
-                    let total_lines = current_tab.content.len_lines();
-                    
-                    // egui::ScrollArea::vertical()
-                    //     .id_source("editor_scroll_area") // DEPRECATED: id_salt
-                    egui::ScrollArea::vertical()
-                        .id_salt("editor_scroll_area") // Use id_salt instead
-                        .show_rows(ui, row_height, total_lines, |ui, row_range| {
-                            ui.horizontal(|ui_horizontal| {
-                                // Gutter para números de linha
-                                ui_horizontal.vertical(|ui_vertical_numbers| {
-                                    ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
-                                    ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
-                                    // ui_vertical_numbers.style_mut().wrap = Some(false); // DEPRECATED: wrap_mode
-                                    ui_vertical_numbers.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend); // Use wrap_mode instead
-
-                                    for i in row_range.start..row_range.end {
-                                        ui_vertical_numbers.monospace(format!("{:>4}", i + 1));
-                                    }
-                                });
-
-                                // Painel de texto do editor (onde o TextEdit estava)
-                                ui_horizontal.add_space(ui_horizontal.available_width() * 0.01); // Pequeno espaçamento
-                                ui_horizontal.vertical(|ui_editor_content| {
-                                    ui_editor_content.set_width(ui_editor_content.available_width());
-                                    ui_editor_content.spacing_mut().item_spacing.y = 0.0;
-
-                                    // LÓGICA DE RENDERIZAÇÃO MANUAL DAS LINHAS E EVENTOS DO TECLADO VIRÁ AQUI
-                                    // Esta é a parte que vamos desenvolver a seguir.
-                                    // Por enquanto, apenas a renderização das linhas:
-                                    for line_idx in row_range.start..row_range.end {
-                                        let line = current_tab.content.line(line_idx);
-                                        let line_str = line.as_str().unwrap_or(""); // Ropey guarantees valid UTF-8
-                                        
-                                        let mut job = LayoutJob::default();
-                                        job.halign = egui::Align::LEFT;
-
-                                        let highlighted_chunks = self.highlighter.highlight_line(line_str, &current_tab.path);
-                                        for (style, text) in highlighted_chunks {
-                                            let egui_color = SyntaxHighlighter::syntect_color_to_egui_color(style.foreground);
-                                            job.append(
-                                                text,
-                                                0.0, // Indentação
-                                                egui::TextFormat {
-                                                    font_id: egui::FontId::monospace(row_height * 0.9), // Ajustar o tamanho da fonte
-                                                    color: egui_color,
-                                                    ..Default::default()
-                                                },
-                                            );
-                                        }
-                                        ui_editor_content.label(job); // Renderiza a linha realçada
-                                    }
-
-                                    // Placeholder para a lógica de input de teclado e cursor
-                                    // Esta lógica será movida para dentro da struct TextEditor ou de um método dela.
-                                    // ui_editor_content.label("Editor content will be rendered here, and input handled manually.");
-                                });
-                            });
-                        });
+                    // Instanciar e exibir o EditorPanel
+                    // Passando referências mutáveis para o conteúdo, o estado do editor e o status de modificado
+                    let mut editor_panel = EditorPanel::new(
+                        &mut current_tab.content,
+                        &mut current_tab.editor_state,
+                        &current_tab.path,
+                        &self.highlighter,
+                        &mut current_tab.is_modified, // Passar a referência mutável para is_modified
+                    );
+                    editor_panel.show(ui); // Chamar o método show do EditorPanel
 
                     // FR.2.3.2: Salvar arquivos usando Ctrl+S
+                    // Esta lógica ainda pode ficar aqui ou ser movida para EditorPanel
+                    // Decidi mantê-la em MyApp por agora, pois é uma ação de nível de aplicação (salvar aba)
                     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
                         eprintln!("Ctrl+S pressionado.");
                         if current_tab.is_modified {
@@ -267,7 +223,7 @@ impl eframe::App for MyApp {
     }
 }
 
-// Métodos auxiliares para MyApp (inalterados, exceto a remoção de apply_string_diff_to_rope)
+// Métodos auxiliares para MyApp
 impl MyApp {
     // Nova função para salvar a aba atualmente selecionada
     fn save_current_tab(&mut self, ctx: &egui::Context) {
