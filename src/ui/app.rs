@@ -11,7 +11,7 @@ use pollster;
 use crate::core::file_handler;
 use crate::syntax_highlighting::highlighter::SyntaxHighlighter;
 use egui::text::LayoutJob; // Importar LayoutJob
-
+use crate::terminal::pty_integration::Terminal; // Apenas Terminal, não precisamos de TerminalOutput aqui
 
 // Constantes de layout (melhor definidas aqui ou em um módulo de config)
 const LINE_HEIGHT: f32 = 16.0;
@@ -37,17 +37,12 @@ pub struct EditorTab {
 impl EditorTab {
     /// Cria uma nova aba do editor.
     pub fn new(path: PathBuf, content: Rope) -> Self {
-        // Inicializa text_buffer_for_egui com o conteúdo completo do Rope.
-        // Em arquivos grandes, isso pode ser um gargalo inicial, mas é necessário
-        // para o egui::TextEdit funcionar.
-        // Otimizações futuras podem envolver carregar apenas o texto visível aqui
-        // e atualizar o buffer dinamicamente, mas isso é mais complexo.
-        let initial_string_content = content.to_string();
+        let initial_string_content = content.to_string(); //
         Self {
             path,
             content,
             is_modified: false,
-            text_buffer_for_egui: initial_string_content,
+            text_buffer_for_egui: initial_string_content, //
         }
     }
 
@@ -74,6 +69,7 @@ pub struct MyApp {
     pub dialog_tab_idx_to_close: Option<usize>,
     pub highlighter: SyntaxHighlighter,
     pub editor_scroll_offset: egui::Vec2, // Para controlar o scroll do editor manualmente
+    pub terminal: Terminal, // Adicionar o terminal aqui
 }
 
 impl Default for MyApp {
@@ -93,6 +89,7 @@ impl Default for MyApp {
             dialog_tab_idx_to_close: None,
             highlighter: SyntaxHighlighter::new(),
             editor_scroll_offset: egui::Vec2::ZERO,
+            terminal: Terminal::new(), // Inicializar o terminal
         }
     }
 }
@@ -130,7 +127,33 @@ impl eframe::App for MyApp {
                 }
             });
 
+        // Botão para abrir/fechar o terminal (FR.3.1.1)
+        egui::TopBottomPanel::bottom("terminal_panel_toggle").show(ctx, |ui| {
+            ui.horizontal(|ui_horizontal| {
+                if ui_horizontal.button("Abrir Terminal").clicked() {
+                    self.terminal.is_open = !self.terminal.is_open;
+                    if self.terminal.is_open {
+                        self.terminal.start(self.current_dir.clone()); // Iniciar o terminal ao abrir (FR.3.2.2)
+                    } else {
+                        self.terminal.stop(); // Parar o terminal ao fechar
+                    }
+                }
+            });
+        });
+
+        // O painel principal do editor/terminal
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Se o terminal estiver aberto, dividimos o espaço
+            if self.terminal.is_open {
+                egui::TopBottomPanel::bottom("integrated_terminal_panel")
+                    .resizable(true) // FR.3.1.2
+                    .min_height(50.0)
+                    .show_inside(ui, |ui_terminal| {
+                        self.terminal.ui(ui_terminal, self.current_dir.clone());
+                    });
+            }
+
+            // O conteúdo do editor principal ocupa o espaço restante do CentralPanel
             if self.open_tabs.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.label("Nenhum arquivo aberto. Selecione um arquivo no explorador.");
@@ -138,6 +161,7 @@ impl eframe::App for MyApp {
                 return;
             }
 
+            // O TopBottomPanel para as abas já está correto
             egui::TopBottomPanel::top("tabs_panel").show_inside(ui, |ui_tabs| {
                 ui_tabs.horizontal(|ui_horizontal_tabs| {
                     egui::ScrollArea::horizontal().show(ui_horizontal_tabs, |ui_scroll_tabs| {
@@ -147,7 +171,6 @@ impl eframe::App for MyApp {
                         let mut tab_to_select: Option<usize> = None;
 
                         for (i, tab) in self.open_tabs.iter().enumerate() {
-                            let _is_selected = self.selected_tab_idx == Some(i);
                             let response = ui_scroll_tabs.selectable_value(&mut self.selected_tab_idx, Some(i), tab.name());
 
                             if response.clicked() {
@@ -186,22 +209,20 @@ impl eframe::App for MyApp {
                     let text_style = egui::TextStyle::Monospace;
                     let row_height = ui.text_style_height(&text_style);
 
-                    // FR.2.5: Números de Linha
                     let total_lines = current_tab.content.len_lines();
 
-                    let mut layouter = |ui: &egui::Ui, s: &str, _wrap_width: f32| { // _wrap_width is unused
+                    let mut layouter = |ui: &egui::Ui, s: &str, _wrap_width: f32| {
                         let mut job = LayoutJob::default();
                         job.halign = egui::Align::LEFT;
 
-                        // Aplica o realce de sintaxe aqui
                         let highlighted_chunks = self.highlighter.highlight_line(s, &current_tab.path);
                         for (style, text) in highlighted_chunks {
                             let egui_color = SyntaxHighlighter::syntect_color_to_egui_color(style.foreground);
                             job.append(
                                 text,
-                                0.0, // Indentação
+                                0.0,
                                 egui::TextFormat {
-                                    font_id: egui::FontId::monospace(row_height * 0.9), // Ajustar o tamanho da fonte
+                                    font_id: egui::FontId::monospace(row_height * 0.9),
                                     color: egui_color,
                                     ..Default::default()
                                 },
@@ -211,14 +232,15 @@ impl eframe::App for MyApp {
                     };
 
                     egui::ScrollArea::vertical()
-                        .id_source("editor_scroll_area")
-                        .show_rows(ui, row_height, total_lines, |ui, row_range| {
-                            ui.horizontal(|ui_horizontal| {
+                        .id_salt("editor_scroll_area") // FR.3.1.2: id_source renomeado para id_salt
+                        .show_rows(ui, row_height, total_lines, |ui_scroll, row_range| {
+                            ui_scroll.horizontal(|ui_horizontal| {
                                 // Gutter para números de linha
                                 ui_horizontal.vertical(|ui_vertical_numbers| {
                                     ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
                                     ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
-                                    ui_vertical_numbers.style_mut().wrap = Some(false);
+                                    ui_vertical_numbers.style_mut().wrap_mode = egui::text::TextWrapMode::Extend; // Corrigido de .wrap para .wrap_mode
+                                    // ui_vertical_numbers.style_mut().wrap = Some(false); // Removido: Usar wrap_mode
 
                                     for i in row_range.start..row_range.end {
                                         ui_vertical_numbers.monospace(format!("{:>4}", i + 1));
@@ -226,12 +248,11 @@ impl eframe::App for MyApp {
                                 });
 
                                 // Painel de texto do editor
-                                ui_horizontal.add_space(ui_horizontal.available_width() * 0.01); // Pequeno espaçamento
+                                ui_horizontal.add_space(ui_horizontal.available_width() * 0.01);
                                 ui_horizontal.vertical(|ui_editor_content| {
                                     ui_editor_content.set_width(ui_editor_content.available_width());
                                     ui_editor_content.spacing_mut().item_spacing.y = 0.0;
 
-                                    // Captura o estado atual da string antes da edição do egui
                                     let old_text_buffer_for_egui = current_tab.text_buffer_for_egui.clone();
 
                                     let response = egui::TextEdit::multiline(&mut current_tab.text_buffer_for_egui)
@@ -243,12 +264,10 @@ impl eframe::App for MyApp {
                                         .layouter(&mut layouter)
                                         .show(ui_editor_content);
 
-                                    // Detectar se o conteúdo do TextEdit foi modificado
                                     if response.response.changed() {
                                         current_tab.is_modified = true;
                                         eprintln!("Conteúdo do arquivo modificado! Detectando e aplicando deltas...");
 
-                                        // Chamar a função para aplicar as diferenças ao Rope
                                         apply_string_diff_to_rope(
                                             &mut current_tab.content,
                                             &old_text_buffer_for_egui,
@@ -357,15 +376,12 @@ impl MyApp {
     }
 }
 
-// Esta função é crucial para a performance de edição.
-// Ela calcula as diferenças entre a string antiga e a nova
-// e aplica as mudanças minimamente ao Rope.
 fn apply_string_diff_to_rope(
     rope: &mut Rope,
     old_s: &str,
     new_s: &str,
 ) {
-    // 1. Encontrar o prefixo comum
+    // Encontrar o prefixo comum
     let mut common_prefix_len = 0;
     for (old_char, new_char) in old_s.chars().zip(new_s.chars()) {
         if old_char == new_char {
@@ -375,53 +391,45 @@ fn apply_string_diff_to_rope(
         }
     }
 
-    // 2. Encontrar o sufixo comum
+    // Encontrar o sufixo comum
     let mut common_suffix_len = 0;
-    // Isso é feito em bytes para simplificar a indexação com `len_utf8`
-    let old_s_bytes = old_s.as_bytes();
-    let new_s_bytes = new_s.as_bytes();
-
-    let mut old_rev_idx = old_s_bytes.len();
-    let mut new_rev_idx = new_s_bytes.len();
-
-    while old_rev_idx > common_prefix_len && new_rev_idx > common_prefix_len {
-        let old_char_len = old_s[..old_rev_idx].chars().rev().next().unwrap().len_utf8();
-        let new_char_len = new_s[..new_rev_idx].chars().rev().next().unwrap().len_utf8();
-
-        if old_s[old_rev_idx - old_char_len..old_rev_idx] == new_s[new_rev_idx - new_char_len..new_rev_idx] {
-            common_suffix_len += old_char_len;
-            old_rev_idx -= old_char_len;
-            new_rev_idx -= new_char_len;
+    for (old_char, new_char) in old_s.chars().rev().zip(new_s.chars().rev()) {
+        if old_char == new_char {
+            common_suffix_len += old_char.len_utf8();
         } else {
             break;
         }
     }
 
-    // Se prefixo e sufixo cobrem a string toda (ou se sobrepõem), não há mudança real
-    if common_prefix_len + common_suffix_len >= old_s.len().min(new_s.len()) {
-        return; // Nenhuma mudança real que precise ser aplicada ao Rope
+    // Se o prefixo e sufixo se sobrepõem, significa que não houve alteração
+    if common_prefix_len + common_suffix_len > old_s.len().min(new_s.len()) {
+        return; // Nenhuma mudança real (ou apenas reordenação interna não detectada por esta lógica simples)
     }
 
-    // 3. Converter os índices de byte para índices de caractere para o Rope
-    let old_start_char_idx = rope.byte_to_char(common_prefix_len);
-    let old_end_char_idx = rope.byte_to_char(rope.len_bytes() - common_suffix_len);
+    // Calcular o índice de início da mudança no `old_s`
+    let old_start_idx = rope.char_to_byte(rope.byte_to_char(common_prefix_len));
 
-    let new_insert_start_byte_idx = common_prefix_len;
-    let new_insert_end_byte_idx = new_s.len() - common_suffix_len;
+    // Calcular o índice de fim da mudança no `old_s`
+    let old_end_idx = rope.len_bytes() - common_suffix_len;
 
-    let chars_to_remove = old_end_char_idx - old_start_char_idx;
-    let chars_to_insert = &new_s[new_insert_start_byte_idx..new_insert_end_byte_idx];
+    // Calcular o índice de início da mudança no `new_s`
+    let new_start_idx = common_prefix_len;
+    // Calcular o índice de fim da mudança no `new_s`
+    let new_end_idx = new_s.len() - common_suffix_len;
 
-    // 4. Aplicar as operações ao Rope
-    // Primeiro, removemos a parte antiga
+    // A parte que foi removida (se houver)
+    let chars_to_remove = rope.byte_to_char(old_end_idx) - rope.byte_to_char(old_start_idx);
+
+    // A parte que foi inserida (se houver)
+    let chars_to_insert = &new_s[new_start_idx..new_end_idx];
+
+    // Aplicar as operações ao Rope
     if chars_to_remove > 0 {
-        rope.remove(old_start_char_idx..old_end_char_idx);
-        eprintln!("Removidos {} chars a partir do char_idx {}", chars_to_remove, old_start_char_idx);
+        rope.remove(rope.byte_to_char(old_start_idx)..rope.byte_to_char(old_end_idx));
+        eprintln!("Removidos {} chars a partir do byte {}", chars_to_remove, old_start_idx);
     }
-
-    // Segundo, inserimos a nova parte
     if !chars_to_insert.is_empty() {
-        rope.insert(old_start_char_idx, chars_to_insert);
-        eprintln!("Inseridos '{}' a partir do char_idx {}", chars_to_insert, old_start_char_idx);
+        rope.insert(rope.byte_to_char(old_start_idx), chars_to_insert);
+        eprintln!("Inseridos '{}' a partir do byte {}", chars_to_insert, old_start_idx);
     }
 }
