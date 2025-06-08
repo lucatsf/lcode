@@ -12,6 +12,7 @@ use crate::core::file_handler;
 use crate::syntax_highlighting::highlighter::SyntaxHighlighter;
 use egui::text::LayoutJob; // Importar LayoutJob
 use crate::terminal::pty_integration::Terminal; // Apenas Terminal, não precisamos de TerminalOutput aqui
+use egui::TextWrapMode; 
 
 // Constantes de layout (melhor definidas aqui ou em um módulo de config)
 const LINE_HEIGHT: f32 = 16.0;
@@ -239,7 +240,7 @@ impl eframe::App for MyApp {
                                 ui_horizontal.vertical(|ui_vertical_numbers| {
                                     ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
                                     ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
-                                    ui_vertical_numbers.style_mut().wrap_mode = egui::text::TextWrapMode::Extend; // Corrigido de .wrap para .wrap_mode
+                                    ui_vertical_numbers.style_mut().wrap_mode = Some(TextWrapMode::Extend);// Corrigido de .wrap para .wrap_mode
                                     // ui_vertical_numbers.style_mut().wrap = Some(false); // Removido: Usar wrap_mode
 
                                     for i in row_range.start..row_range.end {
@@ -403,7 +404,7 @@ fn apply_string_diff_to_rope(
 
     // Se o prefixo e sufixo se sobrepõem, significa que não houve alteração
     if common_prefix_len + common_suffix_len > old_s.len().min(new_s.len()) {
-        return; // Nenhuma mudança real (ou apenas reordenação interna não detectada por esta lógica simples)
+        return;
     }
 
     // Calcular o índice de início da mudança no `old_s`
@@ -413,9 +414,10 @@ fn apply_string_diff_to_rope(
     let old_end_idx = rope.len_bytes() - common_suffix_len;
 
     // Calcular o índice de início da mudança no `new_s`
-    let new_start_idx = common_prefix_len;
+    let new_start_idx = common_prefix_len; // <-- DESCOMENTE OU ADICIONE ESTA LINHA
     // Calcular o índice de fim da mudança no `new_s`
-    let new_end_idx = new_s.len() - common_suffix_len;
+    let new_end_idx = new_s.len() - common_suffix_len; // <-- DESCOMENTE OU ADICIONE ESTA LINHA
+
 
     // A parte que foi removida (se houver)
     let chars_to_remove = rope.byte_to_char(old_end_idx) - rope.byte_to_char(old_start_idx);

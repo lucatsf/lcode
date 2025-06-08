@@ -1,7 +1,6 @@
 // src/terminal/pty_integration.rs
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Command, Child}; // Usamos Command e Child do tokio::process
 use async_trait::async_trait;
 use std::io;
 use std::path::PathBuf;
@@ -13,20 +12,16 @@ use std::task::{Context, Poll};
 use futures::StreamExt;
 use bytes::Buf;
 
-// Novas importações para a crate `portable-pty`
 use portable_pty::{PtySize, CommandBuilder, PtySystem, native_pty_system, MasterPty, PtyPair, Child as PortablePtyChild};
 
-// Custom async writer wrapper for MasterPty
 struct PtyAsyncWriter {
     writer: Box<dyn std::io::Write + Send>,
 }
 
 impl PtyAsyncWriter {
     fn new(master: Box<dyn MasterPty + Send>) -> io::Result<Self> {
-        // Get a writer from the master PTY
         let writer = master.take_writer()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
         Ok(Self { writer })
     }
 }
@@ -37,7 +32,6 @@ impl tokio::io::AsyncWrite for PtyAsyncWriter {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        // Use blocking write for now - this is not ideal but works
         match self.writer.write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(e) => Poll::Ready(Err(e)),
@@ -56,34 +50,21 @@ impl tokio::io::AsyncWrite for PtyAsyncWriter {
     }
 }
 
-// Mensagens que o terminal enviará para a UI
 #[derive(Debug)]
 pub enum TerminalOutput {
-    /// Bytes brutos recebidos do PTY
     Data(Vec<u8>),
-    /// O terminal foi encerrado
     Exited(Option<i32>),
-    /// Erro no PTY ou no shell
     Error(io::Error),
 }
 
-/// Trait para abstrair a interação com o PTY.
-/// Isso pode ser útil para futuros mocks ou diferentes implementações de PTY.
 #[async_trait]
 pub trait PseudoTerminal {
-    /// Inicia um novo processo de shell no PTY.
     async fn spawn_shell(&mut self, working_directory: Option<PathBuf>) -> io::Result<()>;
-
-    /// Envia dados para o shell através do PTY.
     async fn write_to_pty(&mut self, data: &[u8]) -> io::Result<usize>;
-
-    /// Lê dados do shell através do PTY.
     async fn read_from_pty(&mut self) -> io::Result<Vec<u8>>;
-
     fn output_receiver(&mut self) -> mpsc::Receiver<TerminalOutput>;
 }
 
-/// Implementação de `PseudoTerminal` usando `portable-pty`.
 pub struct PortablePtyTerminal {
     pty_system: Box<dyn PtySystem + Send>,
     master_pty: Option<Box<dyn MasterPty + Send>>,
@@ -92,11 +73,17 @@ pub struct PortablePtyTerminal {
     shell_child: Option<Box<dyn PortablePtyChild + Send + Sync>>,
     output_tx: mpsc::Sender<TerminalOutput>,
     read_task_handle: Option<JoinHandle<()>>,
+    // NOVO: Canal para receber dados para escrita no PTY
+    write_tx: mpsc::Sender<Vec<u8>>,
+    write_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    write_task_handle: Option<JoinHandle<()>>,
 }
 
 impl PortablePtyTerminal {
-    pub fn new() -> (Self, mpsc::Receiver<TerminalOutput>) {
+    pub fn new() -> (Self, mpsc::Receiver<TerminalOutput>, mpsc::Sender<Vec<u8>>) { // NOVO: Retorna também o Sender para escrita
         let (output_tx, output_rx) = mpsc::channel(1000);
+        let (write_tx, write_rx) = mpsc::channel(100); // NOVO: Canal para escrita
+
         let instance = Self {
             pty_system: native_pty_system(),
             master_pty: None,
@@ -105,11 +92,13 @@ impl PortablePtyTerminal {
             shell_child: None,
             output_tx,
             read_task_handle: None,
+            write_tx: write_tx.clone(), // NOVO: Clone do sender para a própria struct
+            write_rx: Some(write_rx), // NOVO: Receiver para a struct
+            write_task_handle: None, // NOVO: Handle para a tarefa de escrita
         };
-        (instance, output_rx)
+        (instance, output_rx, write_tx) // NOVO: Retorna o write_tx
     }
 
-    /// Spawna uma tarefa assíncrona para ler do PTY mestre e enviar para o canal de output.
     fn spawn_read_task(&mut self) {
         if let Some(mut reader) = self.reader.take() {
             let tx = self.output_tx.clone();
@@ -148,19 +137,35 @@ impl PortablePtyTerminal {
         }
     }
 
-    /// Helper function to create async streams from MasterPty
+    // NOVO: Tarefa para lidar com a escrita no PTY
+    fn spawn_write_task(&mut self) {
+        if let Some(mut writer) = self.writer.take() {
+            if let Some(mut rx) = self.write_rx.take() {
+                let handle = tokio::spawn(async move {
+                    while let Some(data) = rx.recv().await {
+                        if let Err(e) = writer.write_all(&data).await {
+                            eprintln!("Erro ao escrever no PTY: {}", e);
+                            break;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            eprintln!("Erro ao dar flush no PTY: {}", e);
+                            break;
+                        }
+                    }
+                    eprintln!("Tarefa de escrita do PTY encerrada.");
+                });
+                self.write_task_handle = Some(handle);
+            }
+        }
+    }
+
     fn create_async_streams(master: Box<dyn MasterPty + Send>) -> io::Result<(Pin<Box<dyn tokio::io::AsyncRead + Send>>, Pin<Box<dyn tokio::io::AsyncWrite + Send>>)> {
-        // Get the reader from MasterPty
         let reader = master.try_clone_reader()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        // Create async writer before consuming master
         let async_writer = PtyAsyncWriter::new(master)?;
 
-        // Create a simple async reader using a channel-based approach
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
 
-        // Spawn a task to read from the sync reader and send to the channel
         let _read_handle = tokio::task::spawn_blocking(move || {
             use std::io::Read;
             let mut reader = reader;
@@ -168,11 +173,11 @@ impl PortablePtyTerminal {
 
             loop {
                 match reader.read(&mut buffer) {
-                    Ok(0) => break, // EOF
+                    Ok(0) => break,
                     Ok(n) => {
                         let data = buffer[..n].to_vec();
                         if tx.blocking_send(data).is_err() {
-                            break; // Channel closed
+                            break;
                         }
                     },
                     Err(_) => break,
@@ -180,11 +185,9 @@ impl PortablePtyTerminal {
             }
         });
 
-        // Create an async reader that reads from the channel
         let async_reader = futures::stream::unfold(rx, |mut rx| async move {
             match rx.recv().await {
                 Some(data) => {
-                    // Convert Vec<u8> to Bytes which implements Buf
                     let bytes = bytes::Bytes::from(data);
                     Some((Ok::<bytes::Bytes, std::io::Error>(bytes), rx))
                 },
@@ -192,7 +195,6 @@ impl PortablePtyTerminal {
             }
         });
 
-        // Convert stream to AsyncRead
         let async_reader = tokio_util::io::StreamReader::new(async_reader);
 
         Ok((
@@ -207,6 +209,11 @@ impl Drop for PortablePtyTerminal {
         if let Some(handle) = self.read_task_handle.take() {
             handle.abort();
             eprintln!("Tarefa de leitura do PTY abortada.");
+        }
+        // NOVO: Abortar a tarefa de escrita também
+        if let Some(handle) = self.write_task_handle.take() {
+            handle.abort();
+            eprintln!("Tarefa de escrita do PTY abortada.");
         }
         if let Some(mut child) = self.shell_child.take() {
             eprintln!("Terminando processo PTY (shell)...");
@@ -243,7 +250,6 @@ impl PseudoTerminal for PortablePtyTerminal {
 
         self.shell_child = Some(shell_child);
 
-        // Create async streams from the master PTY
         let (reader_stream, writer_stream) = Self::create_async_streams(pty_pair.master)?;
 
         self.reader = Some(reader_stream);
@@ -251,17 +257,17 @@ impl PseudoTerminal for PortablePtyTerminal {
 
         eprintln!("Shell spawned successfully.");
         self.spawn_read_task();
+        self.spawn_write_task(); // NOVO: Iniciar a tarefa de escrita
 
         Ok(())
     }
 
     async fn write_to_pty(&mut self, data: &[u8]) -> io::Result<usize> {
-        if let Some(writer) = &mut self.writer {
-            writer.write_all(data).await?;
-            writer.flush().await?;
-            Ok(data.len())
+        // Agora, a escrita é feita através do canal para a tarefa de escrita
+        if let Err(_) = self.write_tx.send(data.to_vec()).await {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "Failed to send data to PTY writer task"))
         } else {
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, "PTY writer not active"))
+            Ok(data.len())
         }
     }
 
@@ -282,13 +288,14 @@ pub struct Terminal {
     pub is_open: bool,
     pub scroll_offset: f32,
     pub terminal_output_rx_ui: mpsc::Receiver<TerminalOutput>,
-    pub command_tx: mpsc::Sender<String>,
+    pub command_tx: mpsc::Sender<String>, // Este ainda é o canal da UI para a lógica de `Terminal`
     command_rx_pty: mpsc::Receiver<String>,
+    pty_write_tx: mpsc::Sender<Vec<u8>>, // NOVO: Sender para a tarefa de escrita do PTY
 }
 
 impl Terminal {
     pub fn new() -> Self {
-        let (pty_instance, output_rx_from_pty) = PortablePtyTerminal::new();
+        let (pty_instance, output_rx_from_pty, pty_write_tx) = PortablePtyTerminal::new(); // NOVO: Captura o pty_write_tx
         let (command_tx, command_rx_pty) = mpsc::channel(100);
 
         Terminal {
@@ -300,6 +307,7 @@ impl Terminal {
             terminal_output_rx_ui: output_rx_from_pty,
             command_tx,
             command_rx_pty,
+            pty_write_tx, // NOVO: Inicializa o pty_write_tx
         }
     }
 
@@ -329,10 +337,14 @@ impl Terminal {
                 self.output_buffer.push_str(&format!("> {}\n", command));
                 self.input_buffer.clear();
 
-                let tx_command = self.command_tx.clone();
+                // NOVO: Envia o comando diretamente para a tarefa de escrita do PTY
+                let pty_write_tx_clone = self.pty_write_tx.clone();
+                let command_with_newline = format!("{}\n", command);
+                let data = command_with_newline.as_bytes().to_vec();
+
                 tokio::spawn(async move {
-                    if let Err(e) = tx_command.send(command).await {
-                        eprintln!("Erro ao enviar comando para o PTY: {}", e);
+                    if let Err(e) = pty_write_tx_clone.send(data).await {
+                        eprintln!("Erro ao enviar comando para a tarefa de escrita do PTY: {}", e);
                     }
                 });
                 text_edit_response.request_focus();
@@ -361,23 +373,19 @@ impl Terminal {
             }
         }
 
-        // Processar comandos da UI para o PTY
-        while let Ok(command) = self.command_rx_pty.try_recv() {
-            let command_with_newline = format!("{}\n", command);
-            let data = command_with_newline.as_bytes().to_vec();
-
-            // Create a clone of the PTY for async operations
-            let mut pty_clone = &mut self.pty;
-            let data_clone = data.clone();
-
-            // Use a blocking approach since we're in the UI thread
-            if let Some(_) = &mut pty_clone.writer {
-                let rt = tokio::runtime::Handle::current();
-                if let Err(e) = rt.block_on(pty_clone.write_to_pty(&data_clone)) {
-                    eprintln!("Erro ao escrever no PTY: {}", e);
-                }
-            }
-        }
+        // REMOVIDO: Este bloco agora é desnecessário, pois a escrita é feita diretamente acima
+        // while let Ok(command) = self.command_rx_pty.try_recv() {
+        //     let command_with_newline = format!("{}\n", command);
+        //     let data = command_with_newline.as_bytes().to_vec();
+        //     let mut pty_clone = &mut self.pty;
+        //     let data_clone = data.clone();
+        //     if let Some(_) = &mut pty_clone.writer {
+        //         let rt = tokio::runtime::Handle::current();
+        //         if let Err(e) = rt.block_on(pty_clone.write_to_pty(&data_clone)) {
+        //             eprintln!("Erro ao escrever no PTY: {}", e);
+        //         }
+        //     }
+        // }
     }
 
     /// Inicia o terminal com o diretório de trabalho especificado.
@@ -393,7 +401,6 @@ impl Terminal {
                 },
                 Err(e) => {
                     eprintln!("Erro ao iniciar terminal: {}", e);
-                    // Send error to UI
                     let tx = self.pty.output_tx.clone();
                     tokio::spawn(async move {
                         let _ = tx.send(TerminalOutput::Error(e)).await;
@@ -412,6 +419,10 @@ impl Terminal {
             let _ = child.kill();
         }
         if let Some(handle) = self.pty.read_task_handle.take() {
+            handle.abort();
+        }
+        // NOVO: Abortar a tarefa de escrita
+        if let Some(handle) = self.pty.write_task_handle.take() {
             handle.abort();
         }
         self.pty.master_pty = None;
