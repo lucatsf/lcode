@@ -382,7 +382,6 @@ fn apply_string_diff_to_rope(
     old_s: &str,
     new_s: &str,
 ) {
-    // Encontrar o prefixo comum
     let mut common_prefix_len = 0;
     for (old_char, new_char) in old_s.chars().zip(new_s.chars()) {
         if old_char == new_char {
@@ -392,7 +391,6 @@ fn apply_string_diff_to_rope(
         }
     }
 
-    // Encontrar o sufixo comum
     let mut common_suffix_len = 0;
     for (old_char, new_char) in old_s.chars().rev().zip(new_s.chars().rev()) {
         if old_char == new_char {
@@ -402,36 +400,43 @@ fn apply_string_diff_to_rope(
         }
     }
 
-    // Se o prefixo e sufixo se sobrepõem, significa que não houve alteração
     if common_prefix_len + common_suffix_len > old_s.len().min(new_s.len()) {
         return;
     }
 
-    // Calcular o índice de início da mudança no `old_s`
-    let old_start_idx = rope.char_to_byte(rope.byte_to_char(common_prefix_len));
+    // Calcular os índices de byte da parte alterada no old_s
+    let old_diff_start_byte = common_prefix_len;
+    let old_diff_end_byte = old_s.len() - common_suffix_len;
 
-    // Calcular o índice de fim da mudança no `old_s`
-    let old_end_idx = rope.len_bytes() - common_suffix_len;
+    // Calcular os índices de byte da parte alterada no new_s
+    let new_diff_start_byte = common_prefix_len;
+    let new_diff_end_byte = new_s.len() - common_suffix_len;
 
-    // Calcular o índice de início da mudança no `new_s`
-    let new_start_idx = common_prefix_len; // <-- DESCOMENTE OU ADICIONE ESTA LINHA
-    // Calcular o índice de fim da mudança no `new_s`
-    let new_end_idx = new_s.len() - common_suffix_len; // <-- DESCOMENTE OU ADICIONE ESTA LINHA
-
+    // Converter índices de byte para índices de caractere para o Rope
+    let old_diff_start_char = rope.byte_to_char(old_diff_start_byte);
+    let old_diff_end_char = rope.byte_to_char(old_diff_end_byte);
 
     // A parte que foi removida (se houver)
-    let chars_to_remove = rope.byte_to_char(old_end_idx) - rope.byte_to_char(old_start_idx);
+    // Garanta que old_diff_start_char <= old_diff_end_char para evitar overflow
+    if old_diff_start_char < old_diff_end_char { // Modificado para evitar overflow
+        rope.remove(old_diff_start_char..old_diff_end_char);
+        eprintln!("Removidos {} chars a partir do byte {}", old_diff_end_char - old_diff_start_char, old_diff_start_char);
+    }
+    // else { // Debugging:
+    //     eprintln!("Não removeu: start_char {} >= end_char {}", old_diff_start_char, old_diff_end_char);
+    //     eprintln!("old_s len: {}, new_s len: {}", old_s.len(), new_s.len());
+    //     eprintln!("common_prefix_len: {}, common_suffix_len: {}", common_prefix_len, common_suffix_len);
+    //     eprintln!("old_diff_start_byte: {}, old_diff_end_byte: {}", old_diff_start_byte, old_diff_end_byte);
+    // }
+
 
     // A parte que foi inserida (se houver)
-    let chars_to_insert = &new_s[new_start_idx..new_end_idx];
+    let chars_to_insert = &new_s[new_diff_start_byte..new_diff_end_byte];
 
-    // Aplicar as operações ao Rope
-    if chars_to_remove > 0 {
-        rope.remove(rope.byte_to_char(old_start_idx)..rope.byte_to_char(old_end_idx));
-        eprintln!("Removidos {} chars a partir do byte {}", chars_to_remove, old_start_idx);
-    }
     if !chars_to_insert.is_empty() {
-        rope.insert(rope.byte_to_char(old_start_idx), chars_to_insert);
-        eprintln!("Inseridos '{}' a partir do byte {}", chars_to_insert, old_start_idx);
+        // A inserção ocorre no `old_diff_start_char` porque é onde a parte removida começaria
+        // ou onde a nova parte deve ser inserida se nada foi removido mas algo foi adicionado.
+        rope.insert(old_diff_start_char, chars_to_insert);
+        eprintln!("Inseridos '{}' a partir do byte {}", chars_to_insert, old_diff_start_byte);
     }
 }
