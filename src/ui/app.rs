@@ -13,6 +13,10 @@ use crate::syntax_highlighting::highlighter::SyntaxHighlighter;
 use egui::text::LayoutJob; // Importar LayoutJob
 use crate::terminal::pty_integration::Terminal; // Apenas Terminal, não precisamos de TerminalOutput aqui
 use egui::TextWrapMode; 
+use crate::ui::editor_ui::EditorPanel;
+use crate::core::editor::TextEditor;
+use std::sync::Arc;
+
 
 // Constantes de layout (melhor definidas aqui ou em um módulo de config)
 const LINE_HEIGHT: f32 = 16.0;
@@ -32,18 +36,22 @@ pub struct EditorTab {
     pub path: PathBuf,
     pub content: Rope,
     pub is_modified: bool,
-    pub text_buffer_for_egui: String, // Novo campo para a string que o egui TextEdit usará
+    pub editor_state: TextEditor,
+    pub galley_cache: Vec<Option<Arc<egui::Galley>>>, // NOVO: Cache de galleys
+    pub last_content_len: usize, // NOVO: Para detectar mudanças de tamanho do conteúdo
 }
 
 impl EditorTab {
     /// Cria uma nova aba do editor.
     pub fn new(path: PathBuf, content: Rope) -> Self {
-        let initial_string_content = content.to_string(); //
+        let initial_len = content.len_lines();
         Self {
             path,
             content,
             is_modified: false,
-            text_buffer_for_egui: initial_string_content, //
+            editor_state: TextEditor::new(),
+            galley_cache: vec![None; initial_len], // Inicializa o cache com o número de linhas
+            last_content_len: initial_len, // Guarda o comprimento inicial
         }
     }
 
@@ -202,83 +210,22 @@ impl eframe::App for MyApp {
             });
 
             // Conteúdo do Editor para a aba selecionada
-            if let Some(selected_idx) = self.selected_tab_idx {
+                        if let Some(selected_idx) = self.selected_tab_idx {
                 if let Some(current_tab) = self.open_tabs.get_mut(selected_idx) {
                     ui.heading(format!("Editor: {}", current_tab.name()));
                     ui.separator();
 
-                    let text_style = egui::TextStyle::Monospace;
-                    let row_height = ui.text_style_height(&text_style);
-
-                    let total_lines = current_tab.content.len_lines();
-
-                    let mut layouter = |ui: &egui::Ui, s: &str, _wrap_width: f32| {
-                        let mut job = LayoutJob::default();
-                        job.halign = egui::Align::LEFT;
-
-                        let highlighted_chunks = self.highlighter.highlight_line(s, &current_tab.path);
-                        for (style, text) in highlighted_chunks {
-                            let egui_color = SyntaxHighlighter::syntect_color_to_egui_color(style.foreground);
-                            job.append(
-                                text,
-                                0.0,
-                                egui::TextFormat {
-                                    font_id: egui::FontId::monospace(row_height * 0.9),
-                                    color: egui_color,
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                        ui.fonts(|f| f.layout_job(job))
-                    };
-
-                    egui::ScrollArea::vertical()
-                        .id_salt("editor_scroll_area") // FR.3.1.2: id_source renomeado para id_salt
-                        .show_rows(ui, row_height, total_lines, |ui_scroll, row_range| {
-                            ui_scroll.horizontal(|ui_horizontal| {
-                                // Gutter para números de linha
-                                ui_horizontal.vertical(|ui_vertical_numbers| {
-                                    ui_vertical_numbers.set_width(LINE_NUMBER_GUTTER_WIDTH);
-                                    ui_vertical_numbers.spacing_mut().item_spacing.y = 0.0;
-                                    ui_vertical_numbers.style_mut().wrap_mode = Some(TextWrapMode::Extend);// Corrigido de .wrap para .wrap_mode
-                                    // ui_vertical_numbers.style_mut().wrap = Some(false); // Removido: Usar wrap_mode
-
-                                    for i in row_range.start..row_range.end {
-                                        ui_vertical_numbers.monospace(format!("{:>4}", i + 1));
-                                    }
-                                });
-
-                                // Painel de texto do editor
-                                ui_horizontal.add_space(ui_horizontal.available_width() * 0.01);
-                                ui_horizontal.vertical(|ui_editor_content| {
-                                    ui_editor_content.set_width(ui_editor_content.available_width());
-                                    ui_editor_content.spacing_mut().item_spacing.y = 0.0;
-
-                                    let old_text_buffer_for_egui = current_tab.text_buffer_for_egui.clone();
-
-                                    let response = egui::TextEdit::multiline(&mut current_tab.text_buffer_for_egui)
-                                        .desired_width(ui_editor_content.available_width())
-                                        .desired_rows(row_range.len())
-                                        .font(egui::FontId::monospace(row_height * 0.9))
-                                        .frame(false)
-                                        .lock_focus(false)
-                                        .layouter(&mut layouter)
-                                        .show(ui_editor_content);
-
-                                    if response.response.changed() {
-                                        current_tab.is_modified = true;
-                                        eprintln!("Conteúdo do arquivo modificado! Detectando e aplicando deltas...");
-
-                                        apply_string_diff_to_rope(
-                                            &mut current_tab.content,
-                                            &old_text_buffer_for_egui,
-                                            &current_tab.text_buffer_for_egui,
-                                        );
-                                        eprintln!("Deltas aplicados ao Rope.");
-                                    }
-                                });
-                            });
-                        });
+                    // NOVO: Criar e mostrar o EditorPanel
+                    let mut editor_panel = EditorPanel::new(
+                        &mut current_tab.content,
+                        &mut current_tab.editor_state,
+                        &current_tab.path,
+                        &self.highlighter,
+                        &mut current_tab.is_modified,
+                        &mut current_tab.galley_cache, // NOVO
+                        &mut current_tab.last_content_len, // NOVO
+                    );
+                    editor_panel.show(ui);
 
                     // FR.2.3.2: Salvar arquivos usando Ctrl+S
                     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
